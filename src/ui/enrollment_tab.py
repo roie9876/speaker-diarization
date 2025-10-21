@@ -44,19 +44,47 @@ def render_enrollment_tab():
             help="Enter the name of the person you want to identify"
         )
         
-        # Audio file upload
-        uploaded_file = st.file_uploader(
-            "Upload Reference Audio",
-            type=["wav", "mp3", "m4a", "flac"],
-            help="Upload a clear audio sample of the target speaker (minimum 3 seconds recommended)"
+        # Audio input method selection
+        audio_input_method = st.radio(
+            "Audio Input Method",
+            options=["Upload File", "Record from Microphone"],
+            horizontal=True,
+            help="Choose how to provide reference audio"
         )
         
+        uploaded_file = None
+        temp_path = None
+        duration = None
+        file_extension = None
+        
+        if audio_input_method == "Upload File":
+            # Audio file upload
+            uploaded_file = st.file_uploader(
+                "Upload Reference Audio",
+                type=["wav", "mp3", "m4a", "flac"],
+                help="Upload a clear audio sample of the target speaker (minimum 3 seconds recommended)"
+            )
+        else:
+            # Microphone recording
+            st.markdown("**🎤 Record from Microphone**")
+            st.info("Speak clearly for 5-10 seconds. Longer recordings work better!")
+            
+            # Use Streamlit's audio_input (available in recent versions)
+            recorded_audio = st.audio_input("Record your voice")
+            
+            if recorded_audio is not None:
+                uploaded_file = recorded_audio  # Treat recorded audio same as uploaded file
+                st.success("✓ Recording captured!")
+        
+        # Process audio (uploaded or recorded)
         if uploaded_file is not None:
             # Preview audio
-            st.audio(uploaded_file, format=f"audio/{uploaded_file.name.split('.')[-1]}")
+            file_extension = uploaded_file.name.split('.')[-1] if hasattr(uploaded_file, 'name') and '.' in uploaded_file.name else 'wav'
+            st.audio(uploaded_file, format=f"audio/{file_extension}")
             
             # Show file info
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(uploaded_file.name).suffix) as tmp_file:
+            suffix = f".{file_extension}" if file_extension else ".wav"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
                 tmp_file.write(uploaded_file.getvalue())
                 temp_path = Path(tmp_file.name)
             
@@ -88,13 +116,15 @@ def render_enrollment_tab():
                         
                         # Create profile
                         st.info("💾 Saving profile...")
+                        audio_filename = uploaded_file.name if hasattr(uploaded_file, 'name') else f"recorded_audio_{speaker_name}.wav"
                         profile = profile_manager.create_profile(
                             name=speaker_name,
                             embedding=embedding,
-                            audio_file=uploaded_file.name,
+                            audio_file=audio_filename,
                             metadata={
                                 "audio_duration": duration,
-                                "file_format": uploaded_file.name.split('.')[-1]
+                                "file_format": file_extension,
+                                "source": audio_input_method
                             }
                         )
                         
@@ -180,7 +210,8 @@ def render_enrollment_tab():
             profile_to_export = st.selectbox(
                 "Export Profile",
                 options=[p['id'] for p in profiles],
-                format_func=lambda x: next(p['name'] for p in profiles if p['id'] == x)
+                format_func=lambda x: next(p['name'] for p in profiles if p['id'] == x),
+                key="enrollment_export_profile"
             )
             
             if st.button("Export Profile"):

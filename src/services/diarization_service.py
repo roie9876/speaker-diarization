@@ -78,10 +78,10 @@ class DiarizationService:
         try:
             logger.info("Loading pyannote.audio diarization pipeline...")
             
-            # Load pipeline from Hugging Face
+            # Load pipeline from Hugging Face (token parameter replaces use_auth_token in newer versions)
             pipeline = Pipeline.from_pretrained(
                 "pyannote/speaker-diarization-3.1",
-                use_auth_token=self.config.huggingface_token
+                token=self.config.huggingface_token
             )
             
             # Move to device
@@ -149,15 +149,16 @@ class DiarizationService:
             diarization = self.pipeline(str(audio_file), **params)
             
             # Convert to list of dictionaries
+            # pyannote.audio 4.0+ returns an Annotation object that can be iterated directly
             segments = []
-            for turn, _, speaker in diarization.itertracks(yield_label=True):
-                segment = {
-                    "start": turn.start,
-                    "end": turn.end,
+            for segment, track, speaker in diarization.itertracks(yield_label=True):
+                seg_dict = {
+                    "start": segment.start,
+                    "end": segment.end,
                     "speaker_label": speaker,
-                    "duration": turn.end - turn.start
+                    "duration": segment.end - segment.start
                 }
-                segments.append(segment)
+                segments.append(seg_dict)
             
             # Log summary
             unique_speakers = len(set(seg["speaker_label"] for seg in segments))

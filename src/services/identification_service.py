@@ -7,7 +7,7 @@ specific speakers in audio recordings.
 
 import torch
 import numpy as np
-from pyannote.audio import Inference
+from pyannote.audio import Inference, Model
 from pathlib import Path
 from typing import List, Dict, Union, Optional, Tuple
 from scipy.spatial.distance import cosine
@@ -72,14 +72,14 @@ class IdentificationService:
         try:
             logger.info("Loading pyannote.audio embedding model...")
             
-            # Load embedding model
-            inference = Inference(
+            # Load the model from HuggingFace (pyannote.audio 4.0+ API)
+            model = Model.from_pretrained(
                 "pyannote/embedding",
-                use_auth_token=self.config.huggingface_token
+                token=self.config.huggingface_token
             )
             
-            # Move to device
-            inference.to(self.device)
+            # Create inference object with the loaded model
+            inference = Inference(model, device=self.device)
             
             logger.info("Embedding model loaded successfully")
             return inference

@@ -9,6 +9,11 @@ Provides a web interface with three modes:
 
 import streamlit as st
 from pathlib import Path
+import sys
+
+# Add project root to path
+project_root = Path(__file__).parent.parent.parent
+sys.path.insert(0, str(project_root))
 
 # Set page config
 st.set_page_config(

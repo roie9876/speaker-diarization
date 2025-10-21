@@ -67,7 +67,8 @@ def render_live_tab():
                     "Audio Input Device",
                     options=list(device_options.keys()),
                     format_func=lambda x: device_options[x],
-                    help="Select the microphone or audio input device"
+                    help="Select the microphone or audio input device",
+                    key="live_audio_device"
                 )
             else:
                 st.error("❌ No audio input devices found")
@@ -83,7 +84,8 @@ def render_live_tab():
             options=[p['id'] for p in profiles],
             format_func=lambda x: next(p['name'] for p in profiles if p['id'] == x),
             help="Select the speaker profile to monitor",
-            disabled=st.session_state.monitoring_active
+            disabled=st.session_state.monitoring_active,
+            key="live_target_profile"
         )
     
     with col3:
@@ -105,11 +107,21 @@ def render_live_tab():
         language = st.selectbox(
             "Language",
             options=[
-                "en-US", "en-GB", "es-ES", "fr-FR", "de-DE",
-                "it-IT", "pt-BR", "ja-JP", "ko-KR", "zh-CN"
+                "en-US", "en-GB", "he-IL", "es-ES", "fr-FR", "de-DE",
+                "it-IT", "pt-BR", "ja-JP", "ko-KR", "zh-CN", "ar-SA"
             ],
+            index=0,
+            format_func=lambda x: {
+                "en-US": "English (US)", "en-GB": "English (UK)",
+                "he-IL": "Hebrew (Israel)", "es-ES": "Spanish (Spain)",
+                "fr-FR": "French (France)", "de-DE": "German (Germany)",
+                "it-IT": "Italian (Italy)", "pt-BR": "Portuguese (Brazil)",
+                "ja-JP": "Japanese (Japan)", "ko-KR": "Korean (Korea)",
+                "zh-CN": "Chinese (Mandarin)", "ar-SA": "Arabic (Saudi Arabia)"
+            }.get(x, x),
             help="Select the language for transcription",
-            disabled=st.session_state.monitoring_active
+            disabled=st.session_state.monitoring_active,
+            key="live_language"
         )
     
     st.markdown("---")
