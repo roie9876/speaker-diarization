@@ -141,7 +141,31 @@ class IdentificationService:
             # Convert to numpy array
             embedding_array = np.array(embedding)
             
-            logger.debug(f"Embedding shape: {embedding_array.shape}")
+            # Handle different embedding shapes
+            if embedding_array.ndim > 1:
+                # If shape is (1, 512), flatten to (512,)
+                if embedding_array.shape[0] == 1:
+                    embedding_array = embedding_array.flatten()
+                    logger.debug(f"Flattened embedding from (1, 512) to {embedding_array.shape}")
+                # If shape is (N, 512) where N > 1 (multiple frames), average them
+                elif embedding_array.shape[1] == 512:
+                    num_frames = embedding_array.shape[0]
+                    embedding_array = np.mean(embedding_array, axis=0)
+                    logger.debug(f"Averaged {num_frames} frame embeddings to single (512,) embedding")
+                # Otherwise just flatten (shouldn't happen)
+                else:
+                    embedding_array = embedding_array.flatten()
+                    logger.warning(f"Unexpected embedding shape, flattened to {embedding_array.shape}")
+            
+            # ALWAYS normalize embeddings (L2 normalization) for consistent comparison
+            # This is critical - pyannote embeddings need normalization
+            norm_before = np.linalg.norm(embedding_array)
+            if norm_before > 0:
+                embedding_array = embedding_array / norm_before
+                norm_after = np.linalg.norm(embedding_array)
+                logger.debug(f"Normalized embedding (L2 norm before: {norm_before:.2f}, after: {norm_after:.3f})")
+            
+            logger.debug(f"Final embedding shape: {embedding_array.shape}, range: [{embedding_array.min():.3f}, {embedding_array.max():.3f}]")
             
             return embedding_array
             
@@ -166,6 +190,17 @@ class IdentificationService:
             Calculated as 1 - cosine_distance
         """
         try:
+            # Ensure both embeddings are 1-D
+            if embedding1.ndim > 1:
+                embedding1 = embedding1.flatten()
+            if embedding2.ndim > 1:
+                embedding2 = embedding2.flatten()
+            
+            # Ensure both have same shape
+            if embedding1.shape != embedding2.shape:
+                logger.error(f"Embedding shape mismatch: {embedding1.shape} vs {embedding2.shape}")
+                return 0.0
+            
             # Calculate cosine similarity
             # cosine distance is 1 - cosine similarity
             # We return similarity, so: 1 - cosine_distance = cosine_similarity
@@ -178,6 +213,8 @@ class IdentificationService:
             
         except Exception as e:
             logger.error(f"Embedding comparison failed: {e}")
+            logger.debug(f"Embedding1 shape: {embedding1.shape if hasattr(embedding1, 'shape') else 'N/A'}")
+            logger.debug(f"Embedding2 shape: {embedding2.shape if hasattr(embedding2, 'shape') else 'N/A'}")
             return 0.0
     
     def identify_segments(

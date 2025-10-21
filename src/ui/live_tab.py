@@ -7,6 +7,8 @@ Provides real-time speaker monitoring and transcription.
 import streamlit as st
 from datetime import datetime
 import time
+import numpy as np
+import plotly.graph_objects as go
 
 from src.processors.realtime_processor import RealtimeProcessor
 from src.services.profile_manager import ProfileManager
@@ -40,6 +42,10 @@ def render_live_tab():
     if 'session_start_time' not in st.session_state:
         st.session_state.session_start_time = None
     
+    if 'transcript_queue' not in st.session_state:
+        import queue
+        st.session_state.transcript_queue = queue.Queue()
+    
     # Check if profiles exist
     profiles = profile_manager.list_profiles()
     
@@ -57,19 +63,37 @@ def render_live_tab():
         try:
             devices = realtime_processor.get_audio_devices()
             
+            # Find default device
+            default_device_index = None
+            try:
+                import pyaudio
+                p = pyaudio.PyAudio()
+                default_device_index = p.get_default_input_device_info()['index']
+                p.terminate()
+            except:
+                pass
+            
             device_options = {
-                device['index']: f"{device['name']} ({device['channels']} ch)"
+                device['index']: f"{device['name']}{' 🎤 DEFAULT' if device['index'] == default_device_index else ''} ({device['channels']} ch)"
                 for device in devices
             }
             
             if device_options:
+                # Default to the system default device
+                default_selection = default_device_index if default_device_index in device_options else list(device_options.keys())[0]
+                
                 selected_device = st.selectbox(
                     "Audio Input Device",
                     options=list(device_options.keys()),
                     format_func=lambda x: device_options[x],
-                    help="Select the microphone or audio input device",
+                    index=list(device_options.keys()).index(default_selection) if default_selection in device_options else 0,
+                    help="⚠️ Use the DEFAULT device - same as used for enrollment!",
                     key="live_audio_device"
                 )
+                
+                # Warning if not using default
+                if selected_device != default_device_index:
+                    st.warning("⚠️ You're using a different device than the default. Use the DEFAULT device (marked with 🎤) for best results!")
             else:
                 st.error("❌ No audio input devices found")
                 selected_device = None
@@ -94,9 +118,9 @@ def render_live_tab():
             "Similarity Threshold",
             min_value=0.5,
             max_value=1.0,
-            value=0.75,
+            value=0.50,
             step=0.05,
-            help="Higher = stricter matching",
+            help="Higher = stricter matching (0.50 recommended for this system)",
             disabled=st.session_state.monitoring_active
         )
     
@@ -160,19 +184,128 @@ def render_live_tab():
             elapsed = (datetime.now() - st.session_state.session_start_time).total_seconds()
             st.text(f"Session Duration: {elapsed:.0f}s")
     
-    # Audio Level Meter
+    # CRITICAL: Pull transcripts from queue at the start of each render cycle
+    if st.session_state.monitoring_active:
+        logger.debug(f"Checking for transcripts... has queue attr: {hasattr(realtime_processor, 'ui_transcript_queue')}")
+        
+        if hasattr(realtime_processor, 'ui_transcript_queue'):
+            import queue
+            try:
+                # Get all available transcripts from queue (non-blocking)
+                pulled_count = 0
+                while True:
+                    try:
+                        transcript = realtime_processor.ui_transcript_queue.get_nowait()
+                        st.session_state.live_transcripts.append(transcript)
+                        pulled_count += 1
+                        logger.debug(f"Pulled transcript from queue: {transcript.get('text', '')[:30]}...")
+                    except queue.Empty:
+                        break
+                
+                if pulled_count > 0:
+                    logger.info(f"Pulled {pulled_count} transcript(s) from queue, total now: {len(st.session_state.live_transcripts)}")
+                    
+            except Exception as e:
+                logger.error(f"Error pulling from transcript queue: {e}")
+        else:
+            logger.warning(f"⚠️ No ui_transcript_queue found on processor (id: {id(realtime_processor)})")
+    
+    # Audio Level Meter & Voice Detection
     if st.session_state.monitoring_active:
         st.markdown("---")
-        st.subheader("📊 Audio Level")
         
+        # Waveform Visualization
+        st.subheader("🎙️ Live Audio Waveform")
         try:
-            level = realtime_processor.get_audio_level()
-            level_percent = min(100, level * 100)
+            # Get waveform data from processor
+            waveform = realtime_processor.get_waveform_data(num_samples=200)
             
-            st.progress(level_percent / 100)
-            st.caption(f"Level: {level_percent:.1f}%")
+            # Create time axis (in seconds, last 2 seconds)
+            time_axis = np.linspace(-2, 0, len(waveform))
+            
+            # Create plotly figure with better styling
+            fig = go.Figure()
+            
+            fig.add_trace(go.Scatter(
+                x=time_axis,
+                y=waveform,
+                mode='lines',
+                line=dict(color='#1f77b4', width=1),
+                fill='tozeroy',
+                fillcolor='rgba(31, 119, 180, 0.3)',
+                name='Audio',
+                hovertemplate='Time: %{x:.2f}s<br>Amplitude: %{y:.3f}<extra></extra>'
+            ))
+            
+            fig.update_layout(
+                xaxis_title="Time (seconds)",
+                yaxis_title="Amplitude",
+                height=200,
+                margin=dict(l=20, r=20, t=20, b=40),
+                plot_bgcolor='rgba(240, 242, 246, 0.5)',
+                paper_bgcolor='white',
+                xaxis=dict(
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor='rgba(128, 128, 128, 0.2)',
+                    zeroline=True,
+                    zerolinewidth=2,
+                    zerolinecolor='rgba(128, 128, 128, 0.3)'
+                ),
+                yaxis=dict(
+                    showgrid=True,
+                    gridwidth=1,
+                    gridcolor='rgba(128, 128, 128, 0.2)',
+                    zeroline=True,
+                    zerolinewidth=2,
+                    zerolinecolor='rgba(128, 128, 128, 0.3)',
+                    range=[-1, 1]
+                ),
+                showlegend=False
+            )
+            
+            st.plotly_chart(fig, use_container_width=True, key=f"waveform_{time.time()}")
+            
         except Exception as e:
-            st.warning(f"Unable to read audio level: {e}")
+            st.warning(f"Unable to display waveform: {e}")
+        
+        # Audio Level & Speech Detection
+        col_a, col_b = st.columns([1, 1])
+        
+        with col_a:
+            st.subheader("📊 Audio Level")
+            try:
+                level = realtime_processor.get_audio_level()
+                level_percent = min(100, level * 100)
+                
+                st.progress(level_percent / 100)
+                
+                # Voice activity indicator
+                if level_percent > 1.0:  # Above 1% means audio detected
+                    st.success(f"🎤 Detecting: {level_percent:.1f}%")
+                else:
+                    st.info(f"🔇 Silent: {level_percent:.1f}%")
+            except Exception as e:
+                st.warning(f"Unable to read audio level: {e}")
+        
+        with col_b:
+            st.subheader("🗣️ Speech Detection")
+            # Get processing stats from realtime processor
+            if hasattr(realtime_processor, 'last_processing_stats'):
+                stats = realtime_processor.last_processing_stats
+                segments_detected = stats.get('segments_detected', 0)
+                target_matched = stats.get('target_matched', False)
+                
+                if segments_detected > 0:
+                    st.success(f"✓ Voice detected ({segments_detected} segment(s))")
+                    if target_matched:
+                        st.success("🎯 **Target speaker detected!**")
+                    else:
+                        st.warning("❌ Not target speaker")
+                else:
+                    st.info("👂 Listening...")
+            else:
+                st.info("👂 Waiting for audio...")
     
     # Live Transcript Section
     st.markdown("---")
@@ -251,6 +384,12 @@ def render_live_tab():
             st.session_state.live_transcripts = []
             st.session_state.session_start_time = None
             st.rerun()
+    
+    # Auto-refresh: Trigger rerun at the VERY END after all UI elements are rendered
+    # This ensures transcripts, waveforms, and stats are displayed before the next cycle
+    if st.session_state.monitoring_active:
+        time.sleep(0.5)  # Brief pause between refresh cycles
+        st.rerun()
 
 
 def start_monitoring(
@@ -263,14 +402,30 @@ def start_monitoring(
     """Start live monitoring."""
     
     def transcript_callback(transcript: dict):
-        """Callback for new transcripts."""
+        """Callback for new transcripts from background thread."""
         # Add timestamp
         transcript['timestamp'] = datetime.now().strftime('%H:%M:%S')
         
-        # Add to session state
-        st.session_state.live_transcripts.append(transcript)
+        # Put in queue (thread-safe)
+        # Don't access st.session_state from background thread!
+        import queue
+        try:
+            # Get the queue from somewhere accessible
+            # We'll store it in the processor
+            if hasattr(processor, 'ui_transcript_queue'):
+                processor.ui_transcript_queue.put(transcript)
+                logger.info(f"✅ Queued transcript for UI: [{transcript['timestamp']}] {transcript.get('text', '')[:40]}...")
+            else:
+                logger.error("❌ ui_transcript_queue not found on processor!")
+        except Exception as e:
+            logger.error(f"❌ Could not queue transcript: {e}")
     
     try:
+        # Attach queue to processor so callback can access it
+        import queue
+        processor.ui_transcript_queue = queue.Queue()
+        logger.info(f"✅ Created ui_transcript_queue on processor (id: {id(processor)})")
+        
         processor.start_monitoring(
             target_profile_id=profile_id,
             audio_device_index=device_index,

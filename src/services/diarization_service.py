@@ -146,10 +146,13 @@ class DiarizationService:
                 params["max_speakers"] = max_speakers
             
             # Run diarization
-            diarization = self.pipeline(str(audio_file), **params)
+            diarization_output = self.pipeline(str(audio_file), **params)
+            
+            # pyannote.audio 4.0+ returns a DiarizeOutput dataclass
+            # Extract the Annotation object from the output
+            diarization = diarization_output.speaker_diarization
             
             # Convert to list of dictionaries
-            # pyannote.audio 4.0+ returns an Annotation object that can be iterated directly
             segments = []
             for segment, track, speaker in diarization.itertracks(yield_label=True):
                 seg_dict = {

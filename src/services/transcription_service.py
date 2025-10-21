@@ -138,10 +138,14 @@ class TranscriptionService:
                     f"confidence={confidence:.2f}"
                 )
                 
+                # result.duration is in 100-nanosecond units (ticks)
+                # Convert to seconds: ticks / 10,000,000
+                duration_seconds = result.duration / 10_000_000 if isinstance(result.duration, int) else 0.0
+                
                 return {
                     "text": result.text,
                     "confidence": confidence,
-                    "duration": result.duration.total_seconds(),
+                    "duration": duration_seconds,
                     "language": language
                 }
                 

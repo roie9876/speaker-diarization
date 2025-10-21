@@ -71,6 +71,17 @@ class RealtimeProcessor:
         self.session_transcripts = []
         self.session_start_time = None
         
+        # Real-time stats for UI display
+        self.last_processing_stats = {
+            'segments_detected': 0,
+            'target_matched': False,
+            'last_update': time.time()
+        }
+        
+        # Waveform buffer for visualization (last 2 seconds)
+        self.waveform_buffer_size = int(self.sample_rate * 2)  # 2 seconds
+        self.waveform_buffer = np.zeros(self.waveform_buffer_size, dtype=np.float32)
+        
         logger.info("Real-time processor initialized")
     
     def get_audio_devices(self) -> List[Dict]:
@@ -252,6 +263,11 @@ class RealtimeProcessor:
         # Add to queue for processing
         self.audio_queue.put(audio_data)
         
+        # Update waveform buffer (rolling window)
+        if len(audio_data) > 0:
+            self.waveform_buffer = np.roll(self.waveform_buffer, -len(audio_data))
+            self.waveform_buffer[-len(audio_data):] = audio_data
+        
         return (in_data, pyaudio.paContinue)
     
     def _processing_loop(self) -> None:
@@ -292,6 +308,16 @@ class RealtimeProcessor:
     def _process_audio_chunk(self, audio_chunk: np.ndarray) -> None:
         """Process a single audio chunk."""
         try:
+            # Check audio level
+            rms = np.sqrt(np.mean(audio_chunk**2))
+            max_amplitude = np.max(np.abs(audio_chunk))
+            logger.debug(f"Audio chunk: RMS={rms:.4f}, Max={max_amplitude:.4f}, Duration={len(audio_chunk)/self.sample_rate:.1f}s")
+            
+            # Skip silent chunks (lowered threshold for quieter microphones)
+            if rms < 0.003:  # Very quiet threshold  
+                logger.debug("Chunk too quiet, skipping")
+                return
+            
             # Save chunk to temporary file
             temp_file = self.config.temp_dir / f"realtime_chunk_{time.time()}.wav"
             save_audio(audio_chunk, temp_file, self.sample_rate)
@@ -299,26 +325,40 @@ class RealtimeProcessor:
             # Step 1: Diarization
             segments = self.diarization.diarize(temp_file)
             
+            # Update stats
+            self.last_processing_stats['segments_detected'] = len(segments)
+            self.last_processing_stats['target_matched'] = False
+            self.last_processing_stats['last_update'] = time.time()
+            
             if not segments:
                 # No speech detected
+                logger.debug("No speech segments detected in chunk")
                 temp_file.unlink()
                 return
             
+            logger.info(f"Found {len(segments)} speech segment(s) in chunk")
+            
             # Step 2: Identification
-            identified_segments = self.identification.identify_segments(
+            identified = self.identification.identify_segments(
                 audio_file=temp_file,
                 segments=segments,
                 target_embedding=self.target_embedding,
                 threshold=self.threshold
             )
             
-            # Filter target segments
-            target_segments = [s for s in identified_segments if s["is_target"]]
+            # Filter for target speaker only
+            target_segments = [s for s in identified if s.get('is_target', False)]
+            
+            # Update stats with match result
+            self.last_processing_stats['target_matched'] = len(target_segments) > 0
+            self.last_processing_stats['last_update'] = time.time()
             
             if not target_segments:
-                # No target speaker detected
+                logger.info("No target speaker detected in chunk")
                 temp_file.unlink()
                 return
+            
+            logger.info(f"Target speaker detected in {len(target_segments)} segment(s)!")
             
             # Step 3: Transcription
             transcripts = self.transcription.transcribe_segments(
@@ -434,3 +474,45 @@ class RealtimeProcessor:
         logger.info(f"Session saved to: {output_file}")
         
         return output_file
+    
+    def get_waveform_data(self, num_samples: int = 100) -> np.ndarray:
+        """
+        Get downsampled waveform data for visualization.
+        
+        Args:
+            num_samples: Number of samples to return (for plotting)
+        
+        Returns:
+            Downsampled waveform array
+        """
+        if not self.is_running:
+            return np.zeros(num_samples, dtype=np.float32)
+        
+        try:
+            # Downsample the waveform buffer for visualization
+            buffer_len = len(self.waveform_buffer)
+            if buffer_len == 0:
+                return np.zeros(num_samples, dtype=np.float32)
+            
+            # Calculate downsample factor
+            downsample_factor = max(1, buffer_len // num_samples)
+            
+            # Downsample by taking max of each window (preserves peaks)
+            downsampled = []
+            for i in range(0, buffer_len, downsample_factor):
+                window = self.waveform_buffer[i:i+downsample_factor]
+                if len(window) > 0:
+                    # Take max absolute value to preserve peaks
+                    downsampled.append(np.max(np.abs(window)) * np.sign(np.mean(window)))
+            
+            result = np.array(downsampled[:num_samples], dtype=np.float32)
+            
+            # Pad if needed
+            if len(result) < num_samples:
+                result = np.pad(result, (0, num_samples - len(result)), mode='constant')
+            
+            return result
+            
+        except Exception as e:
+            logger.debug(f"Error getting waveform data: {e}")
+            return np.zeros(num_samples, dtype=np.float32)
