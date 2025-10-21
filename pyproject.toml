@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "speaker-diarization"
+version = "0.1.0"
+description = "Speaker Diarization & Selective Transcription System"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "Speaker Diarization Project"}
+]
+keywords = ["speaker-diarization", "speech-recognition", "azure", "pyannote"]
+
+dependencies = [
+    "streamlit>=1.28.0",
+    "pyannote.audio>=3.1.0",
+    "azure-cognitiveservices-speech>=1.30.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "pyaudio>=0.2.13",
+    "torch>=2.0.0",
+    "torchaudio>=2.0.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "python-dotenv>=1.0.0",
+    "plotly>=5.17.0",
+    "pandas>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.7.0",
+    "flake8>=6.1.0",
+    "mypy>=1.5.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/speaker-diarization"
+Documentation = "https://github.com/yourusername/speaker-diarization/tree/main/docs"
+Repository = "https://github.com/yourusername/speaker-diarization"
+Issues = "https://github.com/yourusername/speaker-diarization/issues"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --cov=src --cov-report=html --cov-report=term"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
