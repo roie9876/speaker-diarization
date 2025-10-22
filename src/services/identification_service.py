@@ -377,3 +377,223 @@ class IdentificationService:
         logger.info(f"Batch extraction complete: {len(embeddings)} embeddings")
         
         return embeddings
+    
+    def assess_profile_quality(
+        self,
+        audio_file: Union[str, Path],
+        embedding: np.ndarray,
+        start: Optional[float] = None,
+        end: Optional[float] = None
+    ) -> Dict:
+        """
+        Assess the quality of an enrollment profile.
+        
+        Evaluates multiple factors:
+        - Audio duration (longer is better, 30-60s ideal)
+        - Audio level (good volume without clipping)
+        - Embedding consistency (stable voice characteristics)
+        - SNR estimate (signal-to-noise ratio)
+        
+        Args:
+            audio_file: Path to audio file
+            embedding: The extracted embedding to assess
+            start: Optional start time (if segment)
+            end: Optional end time (if segment)
+        
+        Returns:
+            Dict with:
+                - overall_score: 0.0-1.0 (0.8+ = Good, 0.6-0.8 = Fair, <0.6 = Poor)
+                - quality_label: "Good", "Fair", or "Poor"
+                - duration_score: 0.0-1.0
+                - audio_level_score: 0.0-1.0
+                - embedding_norm: L2 norm of embedding
+                - details: Dict with detailed metrics
+                - recommendations: List of improvement suggestions
+        """
+        try:
+            from src.utils.audio_utils import load_audio
+            import librosa
+            
+            # Load audio
+            audio, sr = load_audio(audio_file, sample_rate=16000)
+            
+            # Extract segment if specified
+            if start is not None and end is not None:
+                start_sample = int(start * sr)
+                end_sample = int(end * sr)
+                audio = audio[start_sample:end_sample]
+            
+            duration = len(audio) / sr
+            
+            # Initialize scores
+            scores = {}
+            recommendations = []
+            details = {}
+            
+            # 1. Duration Score (30-60 seconds is ideal)
+            if duration < 10:
+                duration_score = duration / 10.0  # Linear scale up to 10s
+                recommendations.append("⚠️ Audio too short - use 30-60 seconds for best results")
+            elif duration < 30:
+                duration_score = 0.5 + (duration - 10) / 40.0  # 0.5 to 1.0
+                recommendations.append("💡 Consider using 30-60 seconds of audio for optimal quality")
+            elif duration <= 60:
+                duration_score = 1.0  # Ideal range
+            else:
+                duration_score = 0.9  # Still good, but diminishing returns
+            
+            scores['duration'] = duration_score
+            details['duration_seconds'] = round(duration, 1)
+            
+            # 2. Audio Level Score (check for good volume and no clipping)
+            rms = np.sqrt(np.mean(audio**2))
+            peak = np.max(np.abs(audio))
+            
+            # Ideal RMS is 0.05-0.3, peak should be < 0.95 (avoid clipping)
+            if rms < 0.01:
+                audio_level_score = 0.3
+                recommendations.append("⚠️ Audio level too low - speak louder or increase microphone gain")
+            elif rms < 0.05:
+                audio_level_score = 0.5 + (rms - 0.01) / 0.04 * 0.3  # 0.5 to 0.8
+                recommendations.append("💡 Audio level is low - consider speaking louder")
+            elif rms <= 0.3:
+                audio_level_score = 1.0  # Ideal range
+            else:
+                audio_level_score = 0.9  # A bit loud but OK
+            
+            # Penalize clipping
+            if peak > 0.95:
+                audio_level_score *= 0.7
+                recommendations.append("⚠️ Audio clipping detected - reduce microphone gain or speak softer")
+            
+            scores['audio_level'] = audio_level_score
+            details['rms_level'] = round(float(rms), 3)
+            details['peak_level'] = round(float(peak), 3)
+            
+            # 3. Embedding Quality (check if embedding is well-formed)
+            embedding_norm = np.linalg.norm(embedding)
+            embedding_std = np.std(embedding)
+            
+            # After normalization, norm should be ~1.0
+            # Std should be reasonable (not too uniform, not too varied)
+            if 0.95 <= embedding_norm <= 1.05:
+                embedding_score = 1.0
+            elif 0.9 <= embedding_norm <= 1.1:
+                embedding_score = 0.8
+            else:
+                embedding_score = 0.6
+                recommendations.append("⚠️ Embedding normalization unusual - audio quality may be poor")
+            
+            # Check embedding diversity (should have some variation)
+            if embedding_std < 0.05:
+                embedding_score *= 0.8
+                recommendations.append("⚠️ Embedding shows low diversity - ensure clear speech")
+            elif embedding_std > 0.5:
+                embedding_score *= 0.9
+                recommendations.append("💡 High embedding variance - background noise may be present")
+            
+            scores['embedding'] = embedding_score
+            details['embedding_norm'] = round(float(embedding_norm), 3)
+            details['embedding_std'] = round(float(embedding_std), 3)
+            
+            # 4. SNR Estimate (rough estimate using RMS)
+            # Calculate noise floor (use quietest 10% of frames)
+            frame_length = 2048
+            hop_length = 512
+            frames = librosa.util.frame(audio, frame_length=frame_length, hop_length=hop_length)
+            frame_rms = np.sqrt(np.mean(frames**2, axis=0))
+            noise_floor = np.percentile(frame_rms, 10)
+            
+            if noise_floor > 0:
+                snr_estimate = 20 * np.log10(rms / noise_floor) if noise_floor > 0 else 30
+            else:
+                snr_estimate = 30  # Very clean
+            
+            if snr_estimate > 20:
+                snr_score = 1.0
+            elif snr_estimate > 15:
+                snr_score = 0.8
+            elif snr_estimate > 10:
+                snr_score = 0.6
+                recommendations.append("⚠️ Moderate background noise detected - use quieter environment")
+            else:
+                snr_score = 0.4
+                recommendations.append("⚠️ High background noise - find a quieter environment")
+            
+            scores['snr'] = snr_score
+            details['snr_estimate_db'] = round(float(snr_estimate), 1)
+            
+            # 5. Calculate Overall Score (weighted average)
+            weights = {
+                'duration': 0.25,
+                'audio_level': 0.25,
+                'embedding': 0.30,
+                'snr': 0.20
+            }
+            
+            overall_score = sum(scores[k] * weights[k] for k in weights)
+            
+            # Determine quality label
+            if overall_score >= 0.8:
+                quality_label = "Excellent"
+                quality_emoji = "✅"
+            elif overall_score >= 0.65:
+                quality_label = "Good"
+                quality_emoji = "✔️"
+            elif overall_score >= 0.5:
+                quality_label = "Fair"
+                quality_emoji = "⚠️"
+            else:
+                quality_label = "Poor"
+                quality_emoji = "❌"
+                recommendations.append("⚠️ Profile quality is low - consider re-recording with improvements")
+            
+            # Add positive feedback if excellent
+            if overall_score >= 0.8 and not recommendations:
+                recommendations.append("✅ Excellent profile quality - ready for use!")
+            
+            # Convert all numpy types to Python native types for JSON serialization
+            def convert_to_native(obj):
+                """Convert numpy types to Python native types."""
+                if isinstance(obj, (np.integer, np.floating)):
+                    return float(obj)
+                elif isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                elif isinstance(obj, dict):
+                    return {k: convert_to_native(v) for k, v in obj.items()}
+                elif isinstance(obj, list):
+                    return [convert_to_native(item) for item in obj]
+                return obj
+            
+            result = {
+                'overall_score': float(round(overall_score, 3)),
+                'quality_label': quality_label,
+                'quality_emoji': quality_emoji,
+                'duration_score': float(round(scores['duration'], 3)),
+                'audio_level_score': float(round(scores['audio_level'], 3)),
+                'embedding_score': float(round(scores['embedding'], 3)),
+                'snr_score': float(round(scores['snr'], 3)),
+                'details': convert_to_native(details),
+                'recommendations': recommendations
+            }
+            
+            logger.info(
+                f"Profile quality assessment: {quality_emoji} {quality_label} "
+                f"(score: {overall_score:.2f})"
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Quality assessment failed: {e}")
+            return {
+                'overall_score': 0.5,
+                'quality_label': "Unknown",
+                'quality_emoji': "❓",
+                'duration_score': 0.5,
+                'audio_level_score': 0.5,
+                'embedding_score': 0.5,
+                'snr_score': 0.5,
+                'details': {},
+                'recommendations': ["⚠️ Could not assess quality - check audio file"]
+            }

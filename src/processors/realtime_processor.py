@@ -21,10 +21,11 @@ except ImportError:
 
 from src.config.config_manager import get_config
 from src.utils.logger import get_logger
-from src.utils.audio_utils import save_audio, extract_segment
+from src.utils.audio_utils import save_audio, extract_segment, load_audio
 from src.services.diarization_service import DiarizationService
 from src.services.identification_service import IdentificationService
 from src.services.transcription_service import TranscriptionService
+from src.services.streaming_transcription_service import StreamingTranscriptionService
 from src.services.profile_manager import ProfileManager
 
 logger = get_logger(__name__)
@@ -52,7 +53,11 @@ class RealtimeProcessor:
         self.diarization = DiarizationService(use_gpu=use_gpu)
         self.identification = IdentificationService(use_gpu=use_gpu)
         self.transcription = TranscriptionService()
+        self.streaming_transcription = StreamingTranscriptionService(self.config)
         self.profile_manager = ProfileManager()
+        
+        # Streaming mode flag (use streaming instead of file-based)
+        self.use_streaming = True  # Enable by default for better accuracy
         
         # Audio stream settings
         self.sample_rate = self.config.sample_rate
@@ -81,6 +86,14 @@ class RealtimeProcessor:
         # Waveform buffer for visualization (last 2 seconds)
         self.waveform_buffer_size = int(self.sample_rate * 2)  # 2 seconds
         self.waveform_buffer = np.zeros(self.waveform_buffer_size, dtype=np.float32)
+        
+        # Transcription buffer for continuous context
+        # Accumulate target speaker audio for better transcription quality
+        self.transcription_buffer = []  # List of audio segments
+        self.buffer_segments = []  # Segment metadata
+        self.buffer_start_time = None
+        self.buffer_duration_target = 15.0  # Accumulate 15 seconds before transcribing
+        self.last_transcription_time = None
         
         logger.info("Real-time processor initialized")
     
@@ -158,6 +171,14 @@ class RealtimeProcessor:
             self.session_transcripts = []
             self.session_start_time = datetime.now()
             
+            # Start streaming transcription if enabled
+            if self.use_streaming:
+                logger.info("Starting streaming transcription...")
+                self.streaming_transcription.start_streaming(
+                    language=language,
+                    callback=self._handle_stream_transcript
+                )
+            
             # Start audio stream
             logger.info("Opening audio stream...")
             self._start_audio_stream(audio_device_index)
@@ -193,6 +214,18 @@ class RealtimeProcessor:
         logger.info("Stopping real-time monitoring...")
         
         self.is_running = False
+        
+        # Stop streaming transcription if enabled
+        if self.use_streaming and self.streaming_transcription.is_streaming:
+            logger.info("Stopping streaming transcription...")
+            self.streaming_transcription.stop_streaming()
+        
+        # Process any remaining buffered audio before stopping (file-based fallback)
+        if self.transcription_buffer:
+            logger.info("Flushing remaining transcription buffer...")
+            # Force transcribe whatever is in buffer
+            self.buffer_duration_target = 0  # Process regardless of duration
+            self._process_transcription_buffer()
         
         # Stop audio stream
         if self.audio_stream:
@@ -260,6 +293,10 @@ class RealtimeProcessor:
         # Convert bytes to numpy array
         audio_data = np.frombuffer(in_data, dtype=np.float32)
         
+        # DISABLED: Audio normalization was degrading quality
+        # Azure Speech Service has better built-in audio processing
+        # Pass raw audio for best accuracy
+        
         # Add to queue for processing
         self.audio_queue.put(audio_data)
         
@@ -323,7 +360,9 @@ class RealtimeProcessor:
             save_audio(audio_chunk, temp_file, self.sample_rate)
             
             # Step 1: Diarization
-            segments = self.diarization.diarize(temp_file)
+            # Force detection of multiple speakers in real-time (expect 1-3 speakers per chunk)
+            # This helps detect speaker transitions when background audio is present
+            segments = self.diarization.diarize(temp_file, min_speakers=1, max_speakers=3)
             
             # Update stats
             self.last_processing_stats['segments_detected'] = len(segments)
@@ -346,6 +385,12 @@ class RealtimeProcessor:
                 threshold=self.threshold
             )
             
+            # Log all detected speakers with similarity scores
+            for seg in identified:
+                speaker_type = "TARGET" if seg.get('is_target') else "OTHER"
+                similarity = seg.get('similarity', 0.0)
+                logger.info(f"  Segment [{seg['start']:.1f}s-{seg['end']:.1f}s]: {speaker_type} (similarity: {similarity:.3f})")
+            
             # Filter for target speaker only
             target_segments = [s for s in identified if s.get('is_target', False)]
             
@@ -353,44 +398,234 @@ class RealtimeProcessor:
             self.last_processing_stats['target_matched'] = len(target_segments) > 0
             self.last_processing_stats['last_update'] = time.time()
             
-            if not target_segments:
+            # Log target detection result
+            if target_segments:
+                logger.info(f"Target speaker detected in {len(target_segments)} segment(s)!")
+                
+                # Stream target audio directly to Azure (NEW APPROACH)
+                if self.use_streaming and self.streaming_transcription.is_streaming:
+                    # Stream target audio segments to Azure in real-time
+                    self._stream_target_audio(temp_file, target_segments)
+                else:
+                    # Fallback to file-based approach
+                    self._add_to_transcription_buffer(temp_file, target_segments)
+                    self._process_transcription_buffer()
+            else:
                 logger.info("No target speaker detected in chunk")
-                temp_file.unlink()
-                return
             
-            logger.info(f"Target speaker detected in {len(target_segments)} segment(s)!")
-            
-            # Step 3: Transcription
-            transcripts = self.transcription.transcribe_segments(
-                audio_file=temp_file,
-                segments=target_segments,
-                language=self.language,
-                target_only=True
-            )
-            
-            # Process transcripts
-            for transcript in transcripts:
-                if transcript.get("text"):
-                    # Add timestamp
-                    transcript["timestamp"] = datetime.now().isoformat()
-                    
-                    # Add to session
-                    self.session_transcripts.append(transcript)
-                    
-                    # Callback
-                    if self.transcript_callback:
-                        self.transcript_callback(transcript)
-                    
-                    logger.info(
-                        f"Real-time transcript: [{transcript['start']:.1f}s] "
-                        f"{transcript['text'][:50]}..."
-                    )
+            # Still transcribe other speakers immediately (without buffering)
+            other_segments = [s for s in identified if not s.get('is_target', False)]
+            if other_segments:
+                transcripts = self.transcription.transcribe_segments(
+                    audio_file=temp_file,
+                    segments=other_segments,
+                    language=self.language,
+                    target_only=False
+                )
+                
+                # Process other speaker transcripts
+                for transcript in transcripts:
+                    if transcript.get("text"):
+                        transcript["timestamp"] = datetime.now().isoformat()
+                        self.session_transcripts.append(transcript)
+                        
+                        if self.transcript_callback:
+                            self.transcript_callback(transcript)
+                        
+                        logger.info(f"Real-time transcript [OTHER]: [{transcript['start']:.1f}s] {transcript['text'][:50]}...")
             
             # Clean up
             temp_file.unlink()
             
         except Exception as e:
             logger.error(f"Error processing audio chunk: {e}")
+    
+    def _add_to_transcription_buffer(self, audio_file: Path, segments: List[Dict]) -> None:
+        """
+        Add target speaker segments to transcription buffer for continuous context.
+        
+        Args:
+            audio_file: Path to audio file containing segments
+            segments: List of segment metadata
+        """
+        try:
+            # Load the audio file
+            from src.utils.audio_utils import load_audio
+            audio, sr = load_audio(audio_file, sample_rate=self.sample_rate)
+            
+            # Add each target segment to buffer
+            for segment in segments:
+                start_sample = int(segment['start'] * sr)
+                end_sample = int(segment['end'] * sr)
+                segment_audio = audio[start_sample:end_sample]
+                
+                self.transcription_buffer.append(segment_audio)
+                self.buffer_segments.append(segment)
+            
+            # Track buffer start time
+            if self.buffer_start_time is None:
+                self.buffer_start_time = time.time()
+            
+            # Calculate total buffered duration
+            total_duration = sum(len(seg) for seg in self.transcription_buffer) / sr
+            logger.debug(f"Transcription buffer: {total_duration:.1f}s accumulated")
+            
+        except Exception as e:
+            logger.error(f"Error adding to transcription buffer: {e}")
+    
+    def _process_transcription_buffer(self) -> None:
+        """
+        Process accumulated buffer when ready (15+ seconds of target speech).
+        """
+        if not self.transcription_buffer:
+            return
+        
+        try:
+            # Calculate buffer duration
+            total_samples = sum(len(seg) for seg in self.transcription_buffer)
+            buffer_duration = total_samples / self.sample_rate
+            
+            # Check if buffer is ready
+            time_since_start = time.time() - self.buffer_start_time if self.buffer_start_time else 0
+            
+            # Transcribe if: 15+ seconds accumulated OR 20+ seconds since last transcription
+            should_transcribe = (
+                buffer_duration >= self.buffer_duration_target or
+                (self.last_transcription_time and time.time() - self.last_transcription_time > 20)
+            )
+            
+            if should_transcribe:
+                logger.info(f"Processing transcription buffer: {buffer_duration:.1f}s of target speech")
+                
+                # Concatenate all buffered audio
+                combined_audio = np.concatenate(self.transcription_buffer)
+                
+                # Save to temporary file
+                temp_buffer_file = self.config.temp_dir / f"buffer_{int(time.time())}.wav"
+                save_audio(combined_audio, temp_buffer_file, self.sample_rate)
+                
+                # Create a single segment for the entire buffer
+                buffer_segment = {
+                    'start': 0.0,
+                    'end': buffer_duration,
+                    'speaker_label': 'TARGET',
+                    'is_target': True,
+                    'similarity': np.mean([seg.get('similarity', 0.5) for seg in self.buffer_segments])
+                }
+                
+                # Transcribe the accumulated buffer as ONE continuous segment
+                transcripts = self.transcription.transcribe_segments(
+                    audio_file=temp_buffer_file,
+                    segments=[buffer_segment],
+                    language=self.language,
+                    target_only=False
+                )
+                
+                # Process transcripts
+                for transcript in transcripts:
+                    if transcript.get("text"):
+                        transcript["timestamp"] = datetime.now().isoformat()
+                        transcript["is_target"] = True
+                        
+                        # Add to session
+                        self.session_transcripts.append(transcript)
+                        
+                        # Callback
+                        if self.transcript_callback:
+                            self.transcript_callback(transcript)
+                        
+                        logger.info(
+                            f"Real-time transcript [TARGET-BUFFERED]: "
+                            f"[{buffer_duration:.1f}s] {transcript['text'][:100]}... "
+                            f"(confidence={transcript.get('confidence', 0):.2f})"
+                        )
+                
+                # Clean up - wait longer to ensure all Azure callbacks are done
+                try:
+                    time.sleep(2.0)  # Increased to 2s for Azure to finish all processing
+                    
+                    # Also clean up segment temp files
+                    for temp_file in self.config.temp_dir.glob("segment_*.wav"):
+                        try:
+                            temp_file.unlink()
+                        except:
+                            pass
+                    
+                    # Clean up buffer file
+                    if temp_buffer_file.exists():
+                        temp_buffer_file.unlink()
+                except Exception as cleanup_error:
+                    logger.warning(f"Failed to cleanup temp file: {cleanup_error}")
+                
+                # Clear buffer
+                self._clear_transcription_buffer()
+                
+        except Exception as e:
+            logger.error(f"Error processing transcription buffer: {e}")
+    
+    def _clear_transcription_buffer(self) -> None:
+        """Clear the transcription buffer and reset timers."""
+        self.transcription_buffer = []
+        self.buffer_segments = []
+        self.buffer_start_time = None
+        self.last_transcription_time = time.time()
+        logger.debug("Transcription buffer cleared")
+    
+    def _stream_target_audio(self, audio_file: Path, segments: List[Dict]) -> None:
+        """
+        Stream target speaker audio segments to Azure in real-time.
+        
+        Args:
+            audio_file: Path to audio file
+            segments: List of target speaker segments
+        """
+        try:
+            # Load audio
+            audio, sr = load_audio(audio_file, sample_rate=self.sample_rate)
+            
+            # Stream each target segment
+            for segment in segments:
+                start_sample = int(segment['start'] * sr)
+                end_sample = int(segment['end'] * sr)
+                segment_audio = audio[start_sample:end_sample]
+                
+                # Push audio to stream
+                self.streaming_transcription.push_audio(segment_audio)
+                
+                logger.debug(f"Streamed {len(segment_audio)} samples to Azure")
+                
+        except Exception as e:
+            logger.error(f"Error streaming target audio: {e}")
+    
+    def _handle_stream_transcript(self, result: Dict) -> None:
+        """
+        Handle transcript from streaming service.
+        
+        Args:
+            result: Transcript result from streaming service
+        """
+        try:
+            if result.get("text"):
+                # Add metadata
+                result["timestamp"] = datetime.now().isoformat()
+                result["is_target"] = True
+                result["speaker_label"] = "TARGET"
+                
+                # Add to session
+                self.session_transcripts.append(result)
+                
+                # Callback to UI
+                if self.transcript_callback:
+                    self.transcript_callback(result)
+                
+                logger.info(
+                    f"Real-time transcript [STREAM]: "
+                    f"{result['text'][:100]}... "
+                    f"(confidence={result.get('confidence', 0):.2f})"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error handling stream transcript: {e}")
     
     def get_audio_level(self) -> float:
         """

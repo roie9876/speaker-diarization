@@ -113,28 +113,32 @@ def render_live_tab():
         )
     
     with col3:
-        # Similarity threshold
+        # Similarity threshold - get from config
+        from src.config.config_manager import get_config
+        config = get_config()
+        default_threshold = config.similarity_threshold
+        
         threshold = st.slider(
             "Similarity Threshold",
-            min_value=0.5,
+            min_value=0.3,
             max_value=1.0,
-            value=0.50,
+            value=float(default_threshold),
             step=0.05,
-            help="Higher = stricter matching (0.50 recommended for this system)",
+            help=f"Current: {default_threshold:.2f} (from .env). Lower = more permissive",
             disabled=st.session_state.monitoring_active
         )
     
     # Additional settings
-    col4, col5 = st.columns(2)
+    col4, col5, col6 = st.columns([2, 2, 1])
     
     with col4:
         language = st.selectbox(
             "Language",
             options=[
-                "en-US", "en-GB", "he-IL", "es-ES", "fr-FR", "de-DE",
+                "he-IL", "en-US", "en-GB", "es-ES", "fr-FR", "de-DE",
                 "it-IT", "pt-BR", "ja-JP", "ko-KR", "zh-CN", "ar-SA"
             ],
-            index=0,
+            index=0,  # Default to Hebrew (he-IL)
             format_func=lambda x: {
                 "en-US": "English (US)", "en-GB": "English (UK)",
                 "he-IL": "Hebrew (Israel)", "es-ES": "Spanish (Spain)",
@@ -147,6 +151,41 @@ def render_live_tab():
             disabled=st.session_state.monitoring_active,
             key="live_language"
         )
+    
+    with col6:
+        st.write("")  # Spacing
+        st.write("")  # Spacing
+        if st.button("🔄 Reload Config", help="Reload settings from .env file", disabled=st.session_state.monitoring_active):
+            try:
+                # Reimport the config to reload .env values
+                import importlib
+                import sys
+                from src.config import config_manager
+                
+                # Reload the config module
+                importlib.reload(config_manager)
+                
+                # Reinitialize services with new config
+                st.session_state.realtime_processor = RealtimeProcessor()
+                st.session_state.profile_manager = ProfileManager()
+                
+                st.success("✅ Configuration reloaded successfully!")
+                st.rerun()
+            except Exception as e:
+                st.error(f"❌ Failed to reload config: {e}")
+    
+    # Display current configuration values
+    with st.expander("📊 Current Configuration Values", expanded=False):
+        from src.config.config_manager import get_config
+        current_config = get_config()
+        
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Similarity Threshold", f"{current_config.similarity_threshold:.2f}")
+        with col_b:
+            st.metric("VAD Threshold", "0.3 (very sensitive)")
+        with col_c:
+            st.metric("Audio Amplification", "3x boost")
     
     st.markdown("---")
     
@@ -315,49 +354,100 @@ def render_live_tab():
     transcript_container = st.container()
     
     with transcript_container:
-        if st.session_state.live_transcripts:
-            for transcript in st.session_state.live_transcripts:
+        # Filter to show only target speaker transcripts
+        target_transcripts = [t for t in st.session_state.live_transcripts if t.get('is_target', False)]
+        
+        if target_transcripts:
+            for transcript in target_transcripts:
                 timestamp = transcript.get('timestamp', '')
                 text = transcript.get('text', '')
                 confidence = transcript.get('confidence', 0)
+                similarity = transcript.get('similarity', 0)
                 
+                # Display target speaker transcript with nice formatting
                 st.markdown(
-                    f"**[{timestamp}]** {text}  \n"
-                    f"*Confidence: {confidence:.2f}*"
+                    f"<div style='background-color: #d4edda; padding: 12px; border-radius: 5px; border-left: 4px solid #28a745; margin-bottom: 10px;'>"
+                    f"<strong style='color: #155724;'>🎯 [{timestamp}]</strong><br>"
+                    f"<span style='color: #155724; font-size: 16px;'>{text}</span><br>"
+                    f"<small style='color: #6c757d;'>Confidence: {confidence:.2f} | Similarity: {similarity:.2f}</small>"
+                    f"</div>",
+                    unsafe_allow_html=True
                 )
-                st.markdown("---")
         else:
             if st.session_state.monitoring_active:
                 st.info("🎤 Listening... Speak to see transcripts appear here")
             else:
                 st.info("Start monitoring to see live transcripts")
+        
+        # Show quality tips if confidence is low
+        if target_transcripts:
+            avg_confidence = sum(t.get('confidence', 0) for t in target_transcripts) / len(target_transcripts)
+            if avg_confidence < 0.70:
+                with st.expander("💡 Tips to Improve Transcription Quality", expanded=False):
+                    st.markdown("""
+                    **Current confidence is low ({:.0f}%). Try these tips:**
+                    
+                    1. **🎤 Microphone Position**: 
+                       - Keep microphone 6-12 inches from your mouth
+                       - Use the SAME device/distance as enrollment
+                    
+                    2. **🔊 Speaking Style**:
+                       - Speak clearly and at normal pace
+                       - Avoid mumbling or speaking too fast
+                       - Pause briefly between sentences
+                    
+                    3. **🔇 Environment**:
+                       - Reduce background noise
+                       - Close windows, turn off fans/AC
+                       - Quiet room works best
+                    
+                    4. **🎯 Re-create Profile**:
+                       - Re-enroll with same environment as live monitoring
+                       - Use 60+ seconds of clear speech
+                       - Ensure quality score ≥0.80
+                    
+                    5. **🌐 Language Settings**:
+                       - Verify language is set to **Hebrew (Israel)** for Hebrew speech
+                       - English transcription requires **English (US/GB)** setting
+                    """.format(avg_confidence * 100))
     
     # Session Statistics
     if st.session_state.live_transcripts:
         st.markdown("---")
         st.subheader("📈 Session Statistics")
         
-        col1, col2, col3 = st.columns(3)
+        # Calculate stats
+        target_transcripts = [t for t in st.session_state.live_transcripts if t.get('is_target', False)]
+        other_transcripts = [t for t in st.session_state.live_transcripts if not t.get('is_target', False)]
+        
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             st.metric(
-                "Segments Detected",
-                len(st.session_state.live_transcripts)
+                "🎯 Your Segments",
+                len(target_transcripts),
+                delta=f"{len(target_transcripts)/max(len(st.session_state.live_transcripts),1)*100:.0f}%"
             )
         
         with col2:
+            st.metric(
+                "👥 Other Segments",
+                len(other_transcripts)
+            )
+        
+        with col3:
             total_chars = sum(
                 len(t.get('text', ''))
                 for t in st.session_state.live_transcripts
             )
-            st.metric("Characters", total_chars)
+            st.metric("Total Characters", total_chars)
         
-        with col3:
-            avg_confidence = sum(
-                t.get('confidence', 0)
-                for t in st.session_state.live_transcripts
-            ) / len(st.session_state.live_transcripts)
-            st.metric("Avg Confidence", f"{avg_confidence:.2f}")
+        with col4:
+            if target_transcripts:
+                avg_similarity = sum(t.get('similarity', 0) for t in target_transcripts) / len(target_transcripts)
+                st.metric("Avg Similarity", f"{avg_similarity:.2f}")
+            else:
+                st.metric("Avg Similarity", "N/A")
     
     # Export Session
     if st.session_state.live_transcripts and not st.session_state.monitoring_active:

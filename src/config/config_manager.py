@@ -90,13 +90,13 @@ class ConfigManager:
     
     @property
     def audio_chunk_duration(self) -> float:
-        """Audio chunk duration in seconds for real-time processing."""
-        return float(os.getenv("AUDIO_CHUNK_DURATION", "3.0"))
+        """Audio chunk duration for real-time processing (seconds)."""
+        return float(os.getenv("AUDIO_CHUNK_DURATION", "1.5"))
     
     @property
     def audio_overlap_duration(self) -> float:
-        """Audio overlap duration in seconds for real-time processing."""
-        return float(os.getenv("AUDIO_OVERLAP_DURATION", "1.0"))
+        """Overlap duration between chunks (seconds)."""
+        return float(os.getenv("AUDIO_OVERLAP_DURATION", "0.75"))
     
     # Storage Paths
     @property

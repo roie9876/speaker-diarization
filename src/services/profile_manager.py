@@ -77,6 +77,10 @@ class ProfileManager:
             # Add embedding shape info
             profile["metadata"]["embedding_shape"] = embedding.shape[0]
             
+            # Add quality assessment if provided in metadata
+            if metadata and "quality" in metadata:
+                profile["quality"] = metadata["quality"]
+            
             # Save to file
             self._save_profile(profile)
             
@@ -164,7 +168,8 @@ class ProfileManager:
                         "id": profile["id"],
                         "name": profile["name"],
                         "created_date": profile["created_date"],
-                        "metadata": profile.get("metadata", {})
+                        "metadata": profile.get("metadata", {}),
+                        "quality": profile.get("quality", {})  # Include quality info
                     }
                     
                     profiles.append(summary)

@@ -87,6 +87,31 @@ class DiarizationService:
             # Move to device
             pipeline.to(self.device)
             
+            # Configure Voice Activity Detection (VAD) for higher sensitivity
+            # Lower thresholds = more sensitive to quieter speech
+            try:
+                # Access the segmentation hyper-parameters
+                # pyannote.audio 3.1+ uses different parameter structure
+                if hasattr(pipeline, "_segmentation"):
+                    # Lower the onset/offset thresholds for voice activity detection
+                    # Default is usually around 0.5 - we lower to 0.4 for more sensitivity
+                    segmentation = pipeline._segmentation
+                    
+                    # Try to set parameters if they exist
+                    if hasattr(segmentation, "onset"):
+                        segmentation.onset = 0.3  # Lower = more sensitive (default ~0.5)
+                        logger.info(f"Set VAD onset threshold to 0.3 (very sensitive)")
+                    
+                    if hasattr(segmentation, "offset"):
+                        segmentation.offset = 0.3  # Lower = more sensitive (default ~0.5)
+                        logger.info(f"Set VAD offset threshold to 0.3 (very sensitive)")
+                    
+                    logger.info("Configured VAD for higher sensitivity to quiet speech")
+                else:
+                    logger.warning("Could not access segmentation parameters - using defaults")
+            except Exception as e:
+                logger.warning(f"Could not configure VAD parameters: {e} - using defaults")
+            
             logger.info("Diarization pipeline loaded successfully")
             return pipeline
             
@@ -105,7 +130,8 @@ class DiarizationService:
         audio_file: Union[str, Path],
         num_speakers: Optional[int] = None,
         min_speakers: Optional[int] = None,
-        max_speakers: Optional[int] = None
+        max_speakers: Optional[int] = None,
+        segmentation_threshold: Optional[float] = None
     ) -> List[Dict]:
         """
         Perform speaker diarization on audio file.
@@ -115,6 +141,7 @@ class DiarizationService:
             num_speakers: Exact number of speakers (if known)
             min_speakers: Minimum number of speakers
             max_speakers: Maximum number of speakers
+            segmentation_threshold: VAD threshold (0.0-1.0). Lower = more sensitive. Default: 0.4
         
         Returns:
             List of diarization segments, each containing:
@@ -145,8 +172,38 @@ class DiarizationService:
             if max_speakers is not None:
                 params["max_speakers"] = max_speakers
             
+            # Apply segmentation threshold if specified
+            original_onset = None
+            original_offset = None
+            if segmentation_threshold is not None:
+                # Temporarily override the VAD thresholds for this call
+                try:
+                    if hasattr(self.pipeline, "_segmentation"):
+                        seg = self.pipeline._segmentation
+                        if hasattr(seg, "onset"):
+                            original_onset = seg.onset
+                            seg.onset = segmentation_threshold
+                        if hasattr(seg, "offset"):
+                            original_offset = seg.offset
+                            seg.offset = segmentation_threshold
+                        logger.debug(f"Using custom VAD threshold: {segmentation_threshold}")
+                except Exception as e:
+                    logger.warning(f"Could not set custom threshold: {e}")
+            
             # Run diarization
             diarization_output = self.pipeline(str(audio_file), **params)
+            
+            # Restore original thresholds if they were changed
+            if segmentation_threshold is not None:
+                try:
+                    if hasattr(self.pipeline, "_segmentation"):
+                        seg = self.pipeline._segmentation
+                        if original_onset is not None and hasattr(seg, "onset"):
+                            seg.onset = original_onset
+                        if original_offset is not None and hasattr(seg, "offset"):
+                            seg.offset = original_offset
+                except Exception as e:
+                    logger.warning(f"Could not restore thresholds: {e}")
             
             # pyannote.audio 4.0+ returns a DiarizeOutput dataclass
             # Extract the Annotation object from the output

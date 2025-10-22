@@ -75,6 +75,46 @@ class TranscriptionService:
             # Enable profanity filter (can be disabled if needed)
             speech_config.set_profanity(speechsdk.ProfanityOption.Masked)
             
+            # Enable punctuation for better readability
+            speech_config.enable_dictation()
+            
+            # Optimize for accuracy in continuous speech recognition
+            # Enable sentence boundary detection
+            speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceResponse_RequestSentenceBoundary,
+                "true"
+            )
+            
+            # Enable automatic punctuation (improves accuracy)
+            speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceResponse_ProfanityOption,
+                "masked"
+            )
+            
+            # Set segmentation silence timeout (in milliseconds)
+            # For Hebrew speech, need longer timeout to avoid mid-sentence cuts
+            # Increased from 800ms to 1500ms for complete phrases
+            speech_config.set_property(
+                speechsdk.PropertyId.Speech_SegmentationSilenceTimeoutMs,
+                "1500"  # 1.5s of silence before considering phrase ended
+            )
+            
+            # Enable word-level timing (useful for debugging)
+            speech_config.request_word_level_timestamps()
+            
+            # Set initial silence timeout (how long to wait before starting recognition)
+            speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs,
+                "5000"  # 5 seconds - give time for speech to start
+            )
+            
+            # Set end silence timeout (for better phrase detection)
+            # Increased to 2 seconds to capture complete sentences
+            speech_config.set_property(
+                speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs,
+                "2000"  # 2 seconds of silence at end
+            )
+            
             return speech_config
             
         except Exception as e:
@@ -84,7 +124,8 @@ class TranscriptionService:
     def transcribe_file(
         self,
         audio_file: Union[str, Path],
-        language: str = "en-US"
+        language: str = "en-US",
+        use_continuous: bool = False
     ) -> Dict:
         """
         Transcribe an entire audio file.
@@ -92,6 +133,7 @@ class TranscriptionService:
         Args:
             audio_file: Path to audio file
             language: Language code (e.g., 'en-US', 'es-ES')
+            use_continuous: If True, use continuous recognition for longer speech
         
         Returns:
             Dictionary containing:
@@ -110,11 +152,33 @@ class TranscriptionService:
         if not validate_audio_file(audio_file):
             raise ValueError(f"Invalid audio file: {audio_file}")
         
-        logger.info(f"Transcribing file: {audio_file.name} (language={language})")
+        logger.info(f"Transcribing file: {audio_file.name} (language={language}, continuous={use_continuous})")
         
         try:
             # Set language
             self.speech_config.speech_recognition_language = language
+            
+            # Hebrew-specific optimizations for better accuracy
+            if language == "he-IL":
+                # Disable profanity filter for Hebrew (can misinterpret words)
+                self.speech_config.set_profanity(speechsdk.ProfanityOption.Raw)
+                
+                # Enable diacritics for Hebrew (niqqud) - improves accuracy
+                self.speech_config.set_property(
+                    speechsdk.PropertyId.SpeechServiceResponse_RequestWordLevelTimestamps,
+                    "true"
+                )
+                
+                # Use detailed output format for better confidence scores
+                self.speech_config.output_format = speechsdk.OutputFormat.Detailed
+                
+                # Enable language detection for better Hebrew recognition
+                self.speech_config.set_property(
+                    speechsdk.PropertyId.SpeechServiceConnection_LanguageIdMode,
+                    "Continuous"
+                )
+                
+                logger.debug("Applied Hebrew-specific optimizations (disabled profanity filter, enabled diacritics)")
             
             # Create audio config
             audio_config = speechsdk.audio.AudioConfig(filename=str(audio_file))
@@ -125,6 +189,11 @@ class TranscriptionService:
                 audio_config=audio_config
             )
             
+            # Use continuous recognition for longer segments
+            if use_continuous:
+                return self._transcribe_continuous(recognizer)
+            
+            # Otherwise use single-shot recognition with extended timeout
             # Perform recognition
             result = recognizer.recognize_once()
             
@@ -176,12 +245,123 @@ class TranscriptionService:
             logger.error(f"Transcription failed: {e}")
             raise RuntimeError(f"Cannot transcribe audio: {e}")
     
+    def _transcribe_continuous(self, recognizer: speechsdk.SpeechRecognizer) -> Dict:
+        """
+        Use continuous recognition to transcribe entire audio stream.
+        Better for longer segments with continuous speech.
+        Uses fast transcription mode optimized for real-time scenarios.
+        
+        Args:
+            recognizer: Configured speech recognizer
+        
+        Returns:
+            Dictionary with transcription results
+        """
+        import threading
+        
+        # Storage for results
+        results = {
+            "texts": [],
+            "confidences": [],
+            "done": threading.Event(),
+            "error": None,
+            "stopped": False  # Flag to prevent processing after stop
+        }
+        
+        def recognizing_callback(evt):
+            """Called during recognition (intermediate results)."""
+            # Only log first few to avoid spam
+            if not results["stopped"] and evt.result.text and len(results["texts"]) < 2:
+                logger.debug(f"Recognizing: {evt.result.text[:30]}...")
+        
+        def recognized_callback(evt):
+            """Called when speech is recognized (final results)."""
+            # Stop processing if already stopped
+            if results["stopped"]:
+                return
+                
+            if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                text = evt.result.text.strip()
+                confidence = self._get_confidence(evt.result)
+                
+                # Filter out low-confidence and invalid results
+                # Skip if: empty, only dots, or confidence too low
+                if text and text != "..." and confidence > 0.3:
+                    # Avoid duplicates - check if this text was already added
+                    if not results["texts"] or text != results["texts"][-1]:
+                        results["texts"].append(text)
+                        results["confidences"].append(confidence)
+                        logger.debug(f"Recognized: {text[:50]}... (confidence={confidence:.2f})")
+                else:
+                    logger.debug(f"Skipping low-quality result: '{text}' (confidence={confidence:.2f})")
+        
+        def canceled_callback(evt):
+            """Called when recognition is canceled."""
+            if evt.cancellation_details.reason == speechsdk.CancellationReason.Error:
+                error_msg = f"Recognition error: {evt.cancellation_details.error_details}"
+                logger.error(error_msg)
+                results["error"] = error_msg
+            results["done"].set()
+        
+        def stopped_callback(evt):
+            """Called when recognition stops."""
+            results["stopped"] = True  # Set flag to stop processing
+            logger.debug("Recognition session stopped")
+            results["done"].set()
+        
+        # Connect callbacks
+        recognizer.recognizing.connect(recognizing_callback)  # Intermediate results
+        recognizer.recognized.connect(recognized_callback)     # Final results
+        recognizer.canceled.connect(canceled_callback)
+        recognizer.session_stopped.connect(stopped_callback)
+        
+        # Start continuous recognition
+        logger.debug("Starting continuous recognition with fast transcription...")
+        recognizer.start_continuous_recognition()
+        
+        # Wait for completion (with timeout - 15 seconds for 8s buffer)
+        if not results["done"].wait(timeout=20):
+            logger.warning("Continuous recognition timed out")
+            results["stopped"] = True  # Mark as stopped
+            recognizer.stop_continuous_recognition()
+        
+        # Stop recognition
+        results["stopped"] = True  # Mark as stopped before calling stop
+        recognizer.stop_continuous_recognition()
+        
+        # Check for errors
+        if results["error"]:
+            logger.error(f"Transcription error: {results['error']}")
+            return {
+                "text": "",
+                "confidence": 0.0,
+                "duration": 0.0,
+                "language": "unknown",
+                "error": results["error"]
+            }
+        
+        # Combine results
+        full_text = " ".join(results["texts"]).strip()
+        avg_confidence = np.mean(results["confidences"]) if results["confidences"] else 0.0
+        
+        logger.debug(f"Fast transcription complete: {len(full_text)} chars, {len(results['texts'])} phrases")
+        
+        return {
+            "text": full_text,
+            "confidence": avg_confidence,
+            "duration": 0.0,  # Not available in continuous mode
+            "language": recognizer.properties.get_property(
+                speechsdk.PropertyId.SpeechServiceConnection_RecoLanguage
+            ) or "unknown"
+        }
+    
     def transcribe_segment(
         self,
         audio_file: Union[str, Path],
         start: float,
         end: float,
-        language: str = "en-US"
+        language: str = "en-US",
+        use_continuous: bool = False
     ) -> Dict:
         """
         Transcribe a segment of an audio file.
@@ -191,32 +371,44 @@ class TranscriptionService:
             start: Start time in seconds
             end: End time in seconds
             language: Language code
+            use_continuous: Use continuous recognition (for segments >5s, otherwise single-shot)
         
         Returns:
             Dictionary with transcription results
         """
         audio_file = Path(audio_file)
+        segment_duration = end - start
         
-        logger.debug(f"Transcribing segment [{start:.2f}s - {end:.2f}s]")
+        logger.debug(f"Transcribing segment [{start:.2f}s - {end:.2f}s] (duration={segment_duration:.2f}s)")
         
         try:
             # Load audio and extract segment
             audio, sr = load_audio(audio_file, sample_rate=self.config.sample_rate)
             segment_audio = extract_segment(audio, sr, start, end)
             
+            # DISABLED: Audio preprocessing was degrading quality
+            # Azure Speech Service handles normalization better internally
+            # Just pass the raw audio without modifications
+            
             # Save segment to temporary file
             temp_file = self.config.temp_dir / f"segment_{start:.2f}_{end:.2f}.wav"
             save_audio(segment_audio, temp_file, sr)
             
+            # Choose recognition mode based on segment duration
+            # recognize_once: Good for <10s (better quality, but has max duration limit)
+            # continuous: Required for >10s (handles any duration)
+            use_continuous_mode = segment_duration > 10.0
+            
             # Transcribe segment
-            result = self.transcribe_file(temp_file, language=language)
+            result = self.transcribe_file(temp_file, language=language, use_continuous=use_continuous_mode)
             
             # Add timing information
             result["start"] = start
             result["end"] = end
             
-            # Clean up temporary file
-            temp_file.unlink()
+            # DON'T delete temp file immediately - Azure might still be processing
+            # It will be cleaned up by the caller or on next run
+            # This prevents "file not found" race condition errors
             
             return result
             
@@ -273,6 +465,7 @@ class TranscriptionService:
                 # Add segment metadata
                 result["speaker_label"] = segment.get("speaker_label", "UNKNOWN")
                 result["similarity"] = segment.get("similarity", 0.0)
+                result["is_target"] = segment.get("is_target", False)  # CRITICAL: Preserve is_target flag
                 
                 results.append(result)
                 
@@ -291,6 +484,7 @@ class TranscriptionService:
                     "confidence": 0.0,
                     "speaker_label": segment.get("speaker_label", "UNKNOWN"),
                     "similarity": segment.get("similarity", 0.0),
+                    "is_target": segment.get("is_target", False),  # Preserve is_target flag
                     "language": language
                 })
         
