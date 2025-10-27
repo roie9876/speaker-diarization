@@ -30,12 +30,13 @@ All core services have been implemented and are ready for use.
   - Speaker segmentation
   - Speaker statistics
 
-- ✅ `src/services/identification_service.py` (370 lines)
+- ✅ `src/services/identification_service.py` (370 lines) 🔄 UPDATED v2.0.1
   - Speaker embedding extraction (512-dim)
   - Cosine similarity comparison
   - Target speaker identification
   - Batch embedding extraction
   - Threshold optimization
+  - **FIX v2.0.1**: Manual segment extraction (avoids pyannote caching bug)
 
 - ✅ `src/services/transcription_service.py` (350 lines)
   - Azure Speech Service integration (batch/fallback mode)
@@ -401,6 +402,35 @@ The system is fully implemented with streaming transcription technology matching
 
 ---
 
-**Last Updated**: October 22, 2025  
-**Version**: 2.0.0  
-**Status**: ✅ **Production Ready** - Streaming transcription validated
+---
+
+**Last Updated**: October 27, 2025  
+**Version**: 2.0.1  
+**Status**: ✅ **Production Ready** - All critical bugs fixed
+
+### 🐛 Recent Bug Fixes (v2.0.1 - October 27, 2025)
+
+#### CRITICAL: pyannote Embedding Caching Bug
+- **Issue**: All segments in batch mode produced identical embeddings (0.2300 similarity)
+- **Impact**: Batch processing failed for multi-speaker audio (0 transcripts)
+- **Fix**: Manual audio segment extraction before embedding inference
+- **File**: `src/services/identification_service.py` lines 120-145
+- **Status**: ✅ RESOLVED - Batch mode now works correctly
+
+#### HIGH: Batch UI Threshold Hardcoding
+- **Issue**: Batch tab ignored .env threshold (used 0.75, min 0.5)
+- **Impact**: User voice not detected (0.43-0.61 similarity < 0.5 minimum)
+- **Fix**: Read threshold from config, allow minimum 0.3
+- **File**: `src/ui/batch_tab.py` lines 62-70
+- **Status**: ✅ RESOLVED - Batch UI now respects .env config
+
+#### MEDIUM: Live UI Transcript Delay
+- **Issue**: Transcripts not appearing when stopping monitoring (Azure 2-5s delay)
+- **Impact**: Missing transcripts that arrived after clicking "Stop"
+- **Fix**: Pull from queue even after monitoring stops
+- **File**: `src/ui/live_tab.py` lines 227-245
+- **Status**: ✅ RESOLVED - All transcripts now display
+
+---
+
+```

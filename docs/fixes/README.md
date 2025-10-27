@@ -6,7 +6,61 @@ This folder contains detailed documentation of all bug fixes and improvements ma
 
 ## 📋 Index of Fixes
 
-### 🚀 Major Implementation (v2.0.0)
+### � Critical Fixes (v2.0.1 - October 27, 2025)
+
+#### PYANNOTE_EMBEDDING_CACHING_BUG
+**Date**: October 27, 2025  
+**Impact**: CRITICAL - Batch mode completely broken for multi-speaker audio  
+**Issue**: All segments in batch processing produced identical embeddings (0.2300 similarity)
+- Root cause: pyannote `Inference` API with "segment" parameter was caching results
+- All 13 segments had identical L2 norm (579.58) and range ([-0.104, 0.141])
+- Made speaker identification impossible in multi-speaker scenarios
+**Fix**: Changed `identification_service.py` to manually extract audio segments first
+```python
+# Before (broken):
+embedding = self.inference({"audio": str(file), "segment": {"start": start, "end": end}})
+
+# After (fixed):
+audio, sr = load_audio(audio_file)
+segment_audio = audio[int(start * sr):int(end * sr)]
+embedding = self.inference({"waveform": torch.from_numpy(segment_audio[np.newaxis, :]), "sample_rate": sr})
+```
+**File**: `src/services/identification_service.py` lines 120-145  
+**Status**: ✅ RESOLVED - Batch mode now works correctly
+
+#### BATCH_UI_THRESHOLD_BUG
+**Date**: October 27, 2025  
+**Impact**: HIGH - Batch mode failing for user's voice in multi-speaker audio  
+**Issue**: Batch tab used hardcoded threshold (0.75, min 0.5), user voice scored 0.43-0.61
+- Prevented detection even after lowering .env SIMILARITY_THRESHOLD to 0.35
+- Single-speaker files worked (higher similarity), multi-speaker failed
+**Fix**: Changed `batch_tab.py` to read threshold from .env config
+```python
+# Before: threshold = st.slider(min_value=0.5, value=0.75)
+# After: threshold = st.slider(min_value=0.3, value=config.similarity_threshold)
+```
+**File**: `src/ui/batch_tab.py` lines 62-70  
+**Status**: ✅ RESOLVED - Batch UI now respects .env threshold
+
+#### LIVE_UI_TRANSCRIPT_DELAY_BUG
+**Date**: October 27, 2025  
+**Impact**: MEDIUM - Transcripts missing when stopping live monitoring  
+**Issue**: UI only pulled transcripts while `monitoring_active=True`, Azure delayed 2-5s
+- User clicks "Stop" → monitoring_active=False → UI stops checking queue
+- Transcripts arrive 2-5s later but never displayed
+**Fix**: Changed `live_tab.py` to pull from queue even after stopping
+```python
+# Now pulls transcripts regardless of monitoring_active state
+if hasattr(processor, 'ui_transcript_queue'):
+    while not processor.ui_transcript_queue.empty():
+        # Process transcript
+```
+**File**: `src/ui/live_tab.py` lines 227-245  
+**Status**: ✅ RESOLVED - All transcripts now appear
+
+---
+
+### �🚀 Major Implementation (v2.0.0)
 
 #### [PUSH_STREAM_IMPLEMENTATION.md](./PUSH_STREAM_IMPLEMENTATION.md)
 **Date**: October 22, 2025  
@@ -99,6 +153,18 @@ OPTIMIZE: Buffer duration reduction (15s → 8s → 5s)
 FIX: Recognition loop bugs
     ↓
 FIX: File cleanup race conditions
+    ↓
+v2.0.0 (October 22, 2025)
+    🚀 MAJOR: Push Stream Implementation
+    ✅ Latency: 5-8s → 1-2s (75% improvement)
+    ✅ Accuracy: 60-70% → 90-95% Hebrew (30% improvement)
+    ↓
+v2.0.1 (October 27, 2025)
+    🐛 CRITICAL: Fixed pyannote embedding caching (batch mode broken)
+    🐛 HIGH: Fixed batch UI threshold hardcoding
+    🐛 MEDIUM: Fixed live UI transcript delay
+    🔧 CONFIG: SIMILARITY_THRESHOLD 0.40 → 0.35
+```
     ↓
 v2.0: PUSH STREAM IMPLEMENTATION 🚀
     ↓

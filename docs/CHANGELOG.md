@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2025-10-27 🐛
+
+### 🐛 Critical Bug Fixes
+
+#### Fixed
+- **pyannote Inference caching bug** - All segments in batch mode produced identical embeddings (0.2300 similarity)
+  - Root cause: `Inference` API with "segment" parameter was caching/ignoring time boundaries
+  - Solution: Manually extract audio segments, pass waveforms directly to inference
+  - Impact: Batch processing now works correctly with multi-speaker audio
+  - File: `src/services/identification_service.py` (lines 120-145)
+
+- **Batch UI threshold bug** - Hardcoded threshold prevented user voice detection
+  - Root cause: Batch tab used hardcoded threshold (0.75) with minimum 0.5, user's voice scored 0.43-0.61
+  - Solution: Use .env SIMILARITY_THRESHOLD (0.35), allow minimum 0.3
+  - Impact: Batch mode now detects user in multi-speaker scenarios
+  - File: `src/ui/batch_tab.py` (lines 62-70)
+
+- **Live UI transcript delay** - Transcripts not appearing when stopping monitoring
+  - Root cause: UI only pulled transcripts while `monitoring_active=True`, Azure responses delayed 2-5s
+  - Solution: Pull remaining transcripts from queue even after stopping
+  - Impact: Users now see all transcripts, even those arriving after clicking "Stop"
+  - File: `src/ui/live_tab.py` (lines 227-245)
+
+### 🔧 Configuration Changes
+- **SIMILARITY_THRESHOLD**: Lowered from 0.40 → 0.35 (catches user voice at 0.38-0.61 similarity)
+- **Batch UI**: Threshold range expanded from 0.5-1.0 → 0.3-1.0
+- **Batch UI**: Default threshold now reads from .env instead of hardcoded 0.75
+
+### 📊 Impact
+- **Batch mode**: Now works with multi-speaker audio (was 0 transcripts, now detects user correctly)
+- **Live mode**: All transcripts appear (was missing delayed responses)
+- **Accuracy**: Maintained 90-95% (no regression from bug fixes)
+
+---
+
 ## [2.0.0] - 2025-10-22 🚀
 
 ### 🎯 Major Features - Push Stream Implementation

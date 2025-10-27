@@ -461,7 +461,7 @@ See [Technology Stack](./docs/technical/technology-stack.md#troubleshooting) for
 ### For Users
 - 📖 **[Quick Start Guide](./docs/QUICK_START.md)** - Get started in 10 minutes
 - 📖 **[Setup Complete Checklist](./docs/SETUP_COMPLETE.md)** - Verify installation
-- 📖 **[Troubleshooting](./docs/technical/technology-stack.md#troubleshooting)** - Common issues and fixes
+- � **[Troubleshooting](#-troubleshooting)** - Common issues and fixes (see below)
 
 ### For Developers
 - 🏗️ **[System Architecture](./docs/architecture/system-architecture.md)** - How components interact
@@ -469,17 +469,152 @@ See [Technology Stack](./docs/technical/technology-stack.md#troubleshooting) for
 - 🤖 **[GitHub Copilot Instructions](./.github/copilot-instructions.md)** - AI-assisted coding guide
 - 🔧 **[Technology Stack](./docs/technical/technology-stack.md)** - All dependencies and setup
 - 🎯 **[Functional Requirements](./docs/requirements/functional-requirements.md)** - 51 feature specs
+- 🐛 **[Bug Fixes Documentation](./docs/fixes/README.md)** - All fixes and improvements
 
 ### For Contributors
 - 🤝 **[Contributing Guide](./docs/CONTRIBUTING.md)** - How to contribute
 - ✅ **[Pre-Push Checklist](./docs/PRE_PUSH_CHECKLIST.md)** - Quality checks
 - 📋 **[Implementation Status](./docs/IMPLEMENTATION_STATUS.md)** - Current state
+- 📝 **[Changelog](./docs/CHANGELOG.md)** - Version history
 
 ---
 
-**Project Status**: ✅ **Production Ready** - Fully implemented and tested  
-**Last Updated**: October 2025  
-**Version**: 1.0.0  
+## 🔧 Troubleshooting
+
+### Batch Mode: No Transcripts in Multi-Speaker Audio
+
+**Symptoms**:
+- ✅ Single speaker files work fine
+- ❌ Multi-speaker files return 0 transcripts
+- Logs show all segments with same similarity (e.g., 0.2300)
+
+**Cause**: pyannote caching bug (fixed in v2.0.1)
+
+**Solution**: Update to v2.0.1 or later. The fix manually extracts audio segments before embedding inference.
+
+**Verification**:
+```bash
+# Check your version
+grep "Version" docs/IMPLEMENTATION_STATUS.md
+# Should show: Version: 2.0.1 or later
+```
+
+---
+
+### Live Mode: Transcripts Missing After Stopping
+
+**Symptoms**:
+- Speak during monitoring
+- Click "Stop Monitoring"
+- No transcripts appear
+
+**Cause**: Azure responses delayed 2-5s, UI stopped checking queue (fixed in v2.0.1)
+
+**Solution**:
+1. Update to v2.0.1 or later
+2. After clicking "Stop", wait 5 seconds for delayed transcripts
+
+---
+
+### Similarity Scores Too Low (< 0.40)
+
+**Symptoms**:
+- Your voice not detected (similarity 0.35-0.45)
+- "No target speaker detected" messages
+- Works better in single-speaker scenarios
+
+**Cause**: Speaker profile quality or threshold too strict
+
+**Solutions**:
+
+**Option 1 - Lower Threshold** (Quick fix):
+```bash
+# Edit .env file
+SIMILARITY_THRESHOLD=0.35  # Lower from 0.40
+```
+
+**Option 2 - Recreate Profile** (Best fix):
+1. Go to Enrollment Tab
+2. Delete current profile
+3. Record 45-60 seconds of clear, varied speech
+4. Create new profile
+5. Target similarity: 0.60+ (much more robust)
+
+---
+
+### Hebrew Transcription Accuracy Low
+
+**Symptoms**:
+- Transcripts showing gibberish or wrong words
+- Accuracy < 80%
+
+**Cause**: Wrong language or old version
+
+**Solutions**:
+1. **Check Language Setting**: Ensure `he-IL` (Hebrew Israel) is selected
+2. **Update to v2.0+**: Push Stream implementation improved Hebrew from 60-70% → 90-95%
+3. **Verify Azure Region**: Use `eastus` or `westeurope` (better Hebrew support)
+
+---
+
+### Pyannote Model Download Issues
+
+**Symptoms**:
+- "Failed to load embedding model"
+- Authentication errors
+
+**Solutions**:
+1. Accept user agreements:
+   - https://huggingface.co/pyannote/speaker-diarization-3.1
+   - https://huggingface.co/pyannote/segmentation-3.0
+   - https://huggingface.co/pyannote/embedding
+2. Generate token: https://huggingface.co/settings/tokens
+3. Update `.env`:
+   ```bash
+   HUGGING_FACE_HUB_TOKEN=your_token_here
+   ```
+
+---
+
+### GPU Not Being Used (Slow Processing)
+
+**Symptoms**:
+- Processing takes >10 seconds per file
+- Logs show "using device: cpu"
+
+**Solutions**:
+
+**For Apple Silicon (M1/M2/M3)**:
+```bash
+# Check MPS availability
+python3 -c "import torch; print(torch.backends.mps.is_available())"
+# Should print: True
+```
+
+**For NVIDIA GPU**:
+```bash
+# Check CUDA
+python3 -c "import torch; print(torch.cuda.is_available())"
+# Should print: True
+```
+
+**Enable GPU in .env**:
+```bash
+USE_GPU=true
+```
+
+---
+
+**Still having issues?** Check the full documentation:
+- 📚 [Technology Stack](./docs/technical/technology-stack.md#troubleshooting)
+- 🐛 [Bug Fixes](./docs/fixes/README.md)
+- 📋 [Implementation Status](./docs/IMPLEMENTATION_STATUS.md)
+
+---
+
+**Project Status**: ✅ **Production Ready** - All critical bugs fixed  
+**Last Updated**: October 27, 2025  
+**Version**: 2.0.1  
 **Maintained by**: [Add your name/organization]
 
 ---

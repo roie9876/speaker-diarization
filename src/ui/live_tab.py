@@ -224,29 +224,30 @@ def render_live_tab():
             st.text(f"Session Duration: {elapsed:.0f}s")
     
     # CRITICAL: Pull transcripts from queue at the start of each render cycle
-    if st.session_state.monitoring_active:
-        logger.debug(f"Checking for transcripts... has queue attr: {hasattr(realtime_processor, 'ui_transcript_queue')}")
-        
-        if hasattr(realtime_processor, 'ui_transcript_queue'):
-            import queue
-            try:
-                # Get all available transcripts from queue (non-blocking)
-                pulled_count = 0
-                while True:
-                    try:
-                        transcript = realtime_processor.ui_transcript_queue.get_nowait()
-                        st.session_state.live_transcripts.append(transcript)
-                        pulled_count += 1
-                        logger.debug(f"Pulled transcript from queue: {transcript.get('text', '')[:30]}...")
-                    except queue.Empty:
-                        break
+    # Pull even when stopped to catch delayed transcripts that arrived after stop
+    logger.debug(f"Checking for transcripts... monitoring_active={st.session_state.monitoring_active}, has queue attr: {hasattr(realtime_processor, 'ui_transcript_queue')}")
+    
+    if hasattr(realtime_processor, 'ui_transcript_queue'):
+        import queue
+        try:
+            # Get all available transcripts from queue (non-blocking)
+            pulled_count = 0
+            while True:
+                try:
+                    transcript = realtime_processor.ui_transcript_queue.get_nowait()
+                    st.session_state.live_transcripts.append(transcript)
+                    pulled_count += 1
+                    logger.debug(f"Pulled transcript from queue: {transcript.get('text', '')[:30]}...")
+                except queue.Empty:
+                    break
+            
+            if pulled_count > 0:
+                logger.info(f"Pulled {pulled_count} transcript(s) from queue, total now: {len(st.session_state.live_transcripts)}")
                 
-                if pulled_count > 0:
-                    logger.info(f"Pulled {pulled_count} transcript(s) from queue, total now: {len(st.session_state.live_transcripts)}")
-                    
-            except Exception as e:
-                logger.error(f"Error pulling from transcript queue: {e}")
-        else:
+        except Exception as e:
+            logger.error(f"Error pulling from transcript queue: {e}")
+    else:
+        if st.session_state.monitoring_active:  # Only warn if monitoring is active
             logger.warning(f"⚠️ No ui_transcript_queue found on processor (id: {id(realtime_processor)})")
     
     # Audio Level Meter & Voice Detection
@@ -377,7 +378,11 @@ def render_live_tab():
             if st.session_state.monitoring_active:
                 st.info("🎤 Listening... Speak to see transcripts appear here")
             else:
-                st.info("Start monitoring to see live transcripts")
+                # Show message about delayed transcripts
+                if len(st.session_state.live_transcripts) == 0:
+                    st.info("Start monitoring to see live transcripts")
+                else:
+                    st.info("💡 Note: Some transcripts may appear a few seconds after you stop (Azure processing delay)")
         
         # Show quality tips if confidence is low
         if target_transcripts:

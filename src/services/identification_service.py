@@ -121,22 +121,29 @@ class IdentificationService:
             raise ValueError(f"Invalid audio file: {audio_file}")
         
         try:
-            # Create segment dict for inference
+            # For segments, we need to manually extract audio first (pyannote Inference caching bug workaround)
             if start is not None and end is not None:
-                segment = {"start": start, "end": end}
                 logger.debug(
                     f"Extracting embedding from {audio_file.name} "
                     f"[{start:.2f}s - {end:.2f}s]"
                 )
+                # Load audio and extract segment manually
+                audio, sr = load_audio(audio_file)
+                start_sample = int(start * sr)
+                end_sample = int(end * sr)
+                segment_audio = audio[start_sample:end_sample]
+                
+                # Create temporary dict with audio waveform directly
+                embedding = self.inference({
+                    "waveform": torch.from_numpy(segment_audio[np.newaxis, :]).to(self.device),
+                    "sample_rate": sr
+                })
             else:
-                segment = None
                 logger.debug(f"Extracting embedding from entire file: {audio_file.name}")
-            
-            # Extract embedding
-            embedding = self.inference({
-                "audio": str(audio_file),
-                "segment": segment
-            })
+                # For full files, use file path
+                embedding = self.inference({
+                    "audio": str(audio_file)
+                })
             
             # Convert to numpy array
             embedding_array = np.array(embedding)
